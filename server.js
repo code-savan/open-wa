@@ -20,10 +20,17 @@ async function initWA() {
       sessionDataPath: SESSION_DIR,
       cacheEnabled: false,
       headless: true,
+      useChrome: true,
       qrTimeout: 0,
+      killProcessOnBrowserClose: true,
+      chromiumArgs: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+      ],
       onQR: (qr) => {
         qrCode = qr;
-        console.log('=== QR CODE GENERATED — scan with WhatsApp ===');
+        console.log('=== QR CODE GENERATED – scan with WhatsApp ===');
       },
     });
 
