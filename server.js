@@ -17,7 +17,16 @@ const waClient = new Client({
   authStrategy: new LocalAuth({ dataPath: '/root/.wa-session' }),
   puppeteer: {
     headless: true,
-    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+    executablePath: '/usr/bin/chromium',
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--disable-software-rasterizer',
+      '--single-process',
+      '--no-zygote',
+    ],
   },
 });
 

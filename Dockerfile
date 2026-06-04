@@ -12,4 +12,5 @@ RUN npm install
 COPY . .
 
 EXPOSE 3000
+ENV NODE_OPTIONS="--max-old-space-size=256"
 CMD ["node", "server.js"]
