@@ -2,6 +2,7 @@ const { Client, LocalAuth } = require('whatsapp-web.js');
 const express = require('express');
 const cors = require('cors');
 const qrcode = require('qrcode-terminal');
+const { scrapeGoogleMaps } = require('./scraper');
 
 const app = express();
 app.use(cors());
@@ -87,6 +88,24 @@ app.post('/send', async (req, res) => {
     const formatted = phone.includes('@c.us') ? phone : `${phone}@c.us`;
     await client.sendMessage(formatted, message);
     res.json({ success: true, to: phone });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/scrape', async (req, res) => {
+  const { queries = [], maxPerQuery = 20 } = req.body;
+  if (!queries.length) {
+    return res.status(400).json({ error: 'queries array is required, e.g. [{ query: "beauty spa", city: "Abuja" }]' });
+  }
+  try {
+    const allResults = [];
+    for (const { query, city } of queries) {
+      const results = await scrapeGoogleMaps({ query, city, maxResults: maxPerQuery });
+      allResults.push(...results);
+      await new Promise(r => setTimeout(r, 3000));
+    }
+    res.json({ count: allResults.length, results: allResults });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
