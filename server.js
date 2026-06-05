@@ -33,8 +33,10 @@ const waClient = new Client({
       '--disable-dev-shm-usage',
       '--disable-gpu',
       '--disable-software-rasterizer',
-      '--single-process',
-      '--no-zygote',
+      '--disable-extensions',
+      '--disable-background-networking',
+      '--disable-features=site-per-process',
+      '--process-per-site',
     ],
   },
 });
