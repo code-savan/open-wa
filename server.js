@@ -6,6 +6,7 @@ const { scrapeGoogleMaps } = require('./scraper');
 const { getSheetData } = require('./dashboard');
 const { google } = require('googleapis');
 const tracker = require('./tracker');
+const QRCode = require('qrcode');
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -84,6 +85,31 @@ app.get('/qr', (_req, res) => {
     res.json({ qr: qrCodeString });
   } else {
     res.json({ qr: null, message: client ? 'already connected' : 'not ready yet' });
+  }
+});
+
+app.get('/qr-page', async (_req, res) => {
+  if (!qrCodeString) {
+    if (client) return res.send('<html><body style="background:#0a0a0b;color:#e4e4e7;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh"><p>Already connected</p></body></html>');
+    return res.send('<html><body style="background:#0a0a0b;color:#e4e4e7;font-family:sans-serif;display:flex;align-items:center;justify-content:center;height:100vh"><p>QR not ready yet, refresh in a few seconds</p></body></html>');
+  }
+  try {
+    const dataUrl = await QRCode.toDataURL(qrCodeString, { width: 400, margin: 2 });
+    res.send(`<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"><title>Scan QR</title>
+<style>body{background:#0a0a0b;color:#e4e4e7;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;margin:0;padding:20px;text-align:center}img{max-width:360px;border-radius:12px;box-shadow:0 0 40px rgba(139,92,246,.2)}h2{font-size:18px;font-weight:500;margin-bottom:8px}p{font-size:13px;color:#71717a;max-width:320px;line-height:1.5}.auto-refresh{font-size:12px;color:#52525b;margin-top:24px}</style>
+</head>
+<body>
+<h2>Scan with WhatsApp</h2>
+<p>Open WhatsApp on your phone → Linked Devices → Link a Device</p>
+<img src="${dataUrl}" alt="QR Code">
+<p class="auto-refresh">Auto-refreshing...</p>
+<script>setTimeout(()=>location.reload(),5000)</script>
+</body>
+</html>`);
+  } catch (err) {
+    res.status(500).send(err.message);
   }
 });
 
