@@ -36,6 +36,7 @@ const waClient = new Client({
       '--disable-extensions',
       '--disable-background-networking',
       '--disable-features=site-per-process',
+      '--disable-blink-features=AutomationControlled',
       '--process-per-site',
     ],
   },
