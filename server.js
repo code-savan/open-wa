@@ -4,6 +4,10 @@ const cors = require('cors');
 const qrcode = require('qrcode-terminal');
 const { scrapeGoogleMaps } = require('./scraper');
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -94,22 +98,75 @@ app.post('/send', async (req, res) => {
 });
 
 app.post('/scrape', async (req, res) => {
-  const { queries = [], maxPerQuery = 20 } = req.body;
+  const { queries = [], maxPerQuery = 15 } = req.body;
   if (!queries.length) {
-    return res.status(400).json({ error: 'queries array is required, e.g. [{ query: "beauty spa", city: "Abuja" }]' });
+    return res.status(400).json({ error: 'queries array required' });
+  }
+  if (!client) {
+    return res.status(503).json({ error: 'WhatsApp not ready yet' });
   }
   try {
+    const browser = waClient.pupBrowser;
+    if (!browser) {
+      return res.status(503).json({ error: 'Browser not ready' });
+    }
     const allResults = [];
     for (const { query, city } of queries) {
-      const results = await scrapeGoogleMaps({ query, city, maxResults: maxPerQuery });
+      const results = await scrapeGoogleMaps({ browser, query, city, maxResults: maxPerQuery });
       allResults.push(...results);
-      await new Promise(r => setTimeout(r, 3000));
+      await sleep(3000 + Math.random() * 2000);
     }
     res.json({ count: allResults.length, results: allResults });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
+
+const SCRAPE_HOUR = parseInt(process.env.SCRAPE_HOUR || '8');
+const SCRAPE_MINUTE = parseInt(process.env.SCRAPE_MINUTE || '45');
+const SCRAPE_N8N_URL = process.env.SCRAPE_N8N_URL || '';
+
+const CITIES = ['Abuja', 'Lagos', 'Port-Harcourt', 'Ibadan', 'Aba', 'Owerri'];
+const NICHES = ['beauty spa', 'barber shop', 'private dental clinic', 'suya spot', 'physiotherapy clinic', 'event planner', 'private school'];
+
+async function runDailyScrape() {
+  console.log(`[Scheduler] Starting daily scrape at ${new Date().toISOString()}`);
+  try {
+    const browser = waClient.pupBrowser;
+    if (!browser) { console.log('[Scheduler] Browser not ready'); return; }
+
+    const allResults = [];
+    for (const city of CITIES) {
+      for (const niche of NICHES) {
+        const results = await scrapeGoogleMaps({ browser, query: niche, city, maxResults: 8 });
+        allResults.push(...results);
+        await sleep(4000 + Math.random() * 3000);
+      }
+    }
+    console.log(`[Scheduler] Scraped ${allResults.length} leads total`);
+
+    if (SCRAPE_N8N_URL && allResults.length > 0) {
+      await fetch(SCRAPE_N8N_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ count: allResults.length, results: allResults }),
+      });
+      console.log(`[Scheduler] Sent results to N8N`);
+    }
+  } catch (err) {
+    console.error('[Scheduler] Error:', err.message);
+  }
+}
+
+setInterval(() => {
+  const now = new Date();
+  const hour = now.getUTCHours() + 1; // Africa/Lagos = UTC+1
+  const minute = now.getMinutes();
+  if (hour === SCRAPE_HOUR && minute === SCRAPE_MINUTE) {
+    runDailyScrape();
+  }
+}, 60000);
+console.log(`[Scheduler] Will run daily at ${SCRAPE_HOUR}:${String(SCRAPE_MINUTE).padStart(2,'0')} Lagos time`);
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
