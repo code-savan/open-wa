@@ -4,6 +4,7 @@ const cors = require('cors');
 const qrcode = require('qrcode-terminal');
 const { scrapeGoogleMaps } = require('./scraper');
 const { getSheetData } = require('./dashboard');
+const { google } = require('googleapis');
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -240,6 +241,35 @@ const SCRAPE_N8N_URL = process.env.SCRAPE_N8N_URL || '';
 const CITIES = ['Abuja', 'Lagos', 'Port-Harcourt', 'Ibadan', 'Aba', 'Owerri'];
 const NICHES = ['beauty spa', 'barber shop', 'private dental clinic', 'suya spot', 'physiotherapy clinic', 'event planner', 'private school'];
 
+const SHEET_ID = '1TkWu6TTLaImjFliOKOPS0AYznmf45TWEJSeEfNORguc';
+
+async function appendToSheet(rows) {
+  const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+  if (!raw) { console.log('[Sheets] No credentials configured'); return; }
+  let sa;
+  try { sa = JSON.parse(raw); }
+  catch { sa = JSON.parse(Buffer.from(raw, 'base64').toString()); }
+
+  const auth = new google.auth.JWT(sa.client_email, null, sa.private_key, ['https://www.googleapis.com/auth/spreadsheets']);
+  const sheets = google.sheets({ version: 'v4', auth });
+
+  const headers = ['business_name','phone','address','rating','city','niche','google_maps_url','status','source','scraped_at'];
+  const values = rows.map(r => headers.map(h => {
+    let v = r[h] || '';
+    if (h === 'scraped_at') v = new Date().toISOString();
+    return String(v);
+  }));
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: SHEET_ID,
+    range: 'Sheet1',
+    valueInputOption: 'USER_ENTERED',
+    insertDataOption: 'INSERT_ROWS',
+    requestBody: { values },
+  });
+  console.log(`[Sheets] Appended ${values.length} rows`);
+}
+
 async function runDailyScrape() {
   console.log(`[Scheduler] Starting daily scrape at ${new Date().toISOString()}`);
   try {
@@ -255,6 +285,10 @@ async function runDailyScrape() {
       }
     }
     console.log(`[Scheduler] Scraped ${allResults.length} leads total`);
+
+    if (allResults.length > 0) {
+      await appendToSheet(allResults);
+    }
 
     if (SCRAPE_N8N_URL && allResults.length > 0) {
       await fetch(SCRAPE_N8N_URL, {
