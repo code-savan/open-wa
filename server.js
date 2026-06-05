@@ -5,6 +5,7 @@ const qrcode = require('qrcode-terminal');
 const { scrapeGoogleMaps } = require('./scraper');
 const { getSheetData } = require('./dashboard');
 const { google } = require('googleapis');
+const tracker = require('./tracker');
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -51,6 +52,10 @@ waClient.on('ready', () => {
 });
 
 waClient.on('message', async (msg) => {
+  const isFromMe = msg.fromMe || msg._data?.fromMe;
+  if (!isFromMe) {
+    tracker.add('message_replied', { from: msg.from, body: msg.body.slice(0, 50) });
+  }
   if (!WEBHOOK_URL) return;
   try {
     await fetch(WEBHOOK_URL, {
@@ -93,6 +98,7 @@ app.post('/send', async (req, res) => {
   try {
     const formatted = phone.includes('@c.us') ? phone : `${phone}@c.us`;
     await client.sendMessage(formatted, message);
+    tracker.add('message_sent', { to: phone, body: message.slice(0, 50) });
     res.json({ success: true, to: phone });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -118,6 +124,7 @@ app.post('/scrape', async (req, res) => {
       allResults.push(...results);
       await sleep(3000 + Math.random() * 2000);
     }
+    tracker.add('scrape_done', { count: allResults.length, queries });
     res.json({ count: allResults.length, results: allResults });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -128,29 +135,26 @@ app.get('/api/stats', async (_req, res) => {
   try {
     const sheetId = '1TkWu6TTLaImjFliOKOPS0AYznmf45TWEJSeEfNORguc';
     const rows = await getSheetData(sheetId);
-    if (!rows || rows.length < 2) {
-      return res.json({ total: 0, byStatus: {}, byCity: {}, byNiche: {}, recent: [] });
+    let total = 0, byStatus = {}, byCity = {}, byNiche = {}, recent = [];
+    if (rows && rows.length >= 2) {
+      const headers = rows[0];
+      const data = rows.slice(1).map(r => {
+        const obj = {};
+        headers.forEach((h, i) => obj[h.trim()] = (r[i] || '').trim());
+        return obj;
+      });
+      const valid = data.filter(r => r.business_name);
+      total = valid.length;
+      valid.forEach(r => {
+        byStatus[r.status || 'new'] = (byStatus[r.status || 'new'] || 0) + 1;
+        byCity[r.city || 'unknown'] = (byCity[r.city || 'unknown'] || 0) + 1;
+        byNiche[r.niche || 'unknown'] = (byNiche[r.niche || 'unknown'] || 0) + 1;
+      });
+      recent = valid.slice(-20).reverse();
     }
-    const headers = rows[0];
-    const data = rows.slice(1).map(r => {
-      const obj = {};
-      headers.forEach((h, i) => obj[h.trim()] = (r[i] || '').trim());
-      return obj;
-    });
-
-    const valid = data.filter(r => r.business_name);
-    const byStatus = {};
-    const byCity = {};
-    const byNiche = {};
-    valid.forEach(r => {
-      byStatus[r.status || 'new'] = (byStatus[r.status || 'new'] || 0) + 1;
-      byCity[r.city || 'unknown'] = (byCity[r.city || 'unknown'] || 0) + 1;
-      byNiche[r.niche || 'unknown'] = (byNiche[r.niche || 'unknown'] || 0) + 1;
-    });
-
-    const recent = valid.slice(-20).reverse();
-
-    res.json({ total: valid.length, byStatus, byCity, byNiche, recent });
+    const auto = tracker.getStats();
+    const timeline = tracker.getAll(30);
+    res.json({ total, byStatus, byCity, byNiche, recent, auto, timeline });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -162,73 +166,139 @@ app.get('/dashboard', (_req, res) => {
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Morrnaire Dashboard</title>
+<title>Morrnaire — Automation Dashboard</title>
 <style>
-* { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f0f0f; color: #e0e0e0; padding: 24px; }
-h1 { font-size: 24px; font-weight: 600; margin-bottom: 24px; color: #fff; }
-h2 { font-size: 16px; font-weight: 500; margin-bottom: 12px; color: #aaa; text-transform: uppercase; letter-spacing: 0.5px; }
-.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin-bottom: 24px; }
-.card { background: #1a1a1a; border-radius: 12px; padding: 20px; border: 1px solid #2a2a2a; }
-.card .value { font-size: 32px; font-weight: 700; color: #fff; }
-.card .label { font-size: 13px; color: #888; margin-top: 4px; }
-.panel { background: #1a1a1a; border-radius: 12px; padding: 20px; margin-bottom: 16px; border: 1px solid #2a2a2a; }
-.bar { display: flex; align-items: center; margin-bottom: 8px; }
-.bar .key { width: 140px; font-size: 13px; color: #ccc; }
-.bar .track { flex: 1; height: 20px; background: #2a2a2a; border-radius: 10px; overflow: hidden; }
-.bar .fill { height: 100%; background: linear-gradient(90deg, #6366f1, #8b5cf6); border-radius: 10px; transition: width 0.5s; }
-.bar .count { width: 48px; text-align: right; font-size: 13px; color: #888; margin-left: 8px; }
-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-th { text-align: left; color: #888; font-weight: 500; padding: 8px 12px; border-bottom: 1px solid #2a2a2a; }
-td { padding: 8px 12px; border-bottom: 1px solid #222; color: #ccc; }
-.badge { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 11px; font-weight: 500; }
-.badge-new { background: #1e3a5f; color: #60a5fa; }
-.badge-sent { background: #1e3a2f; color: #4ade80; }
-.badge-replied { background: #3a1e2f; color: #f472b6; }
-.error { color: #ef4444; text-align: center; padding: 40px; }
-.loading { text-align: center; padding: 40px; color: #666; }
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; background:#0a0a0b; color:#e4e4e7; padding:32px; }
+h1 { font-size:20px; font-weight:600; color:#fff; }
+h1 span { color:#8b5cf6; }
+.header { display:flex; justify-content:space-between; align-items:center; margin-bottom:32px; }
+.header-right { font-size:12px; color:#52525b; }
+.section-title { font-size:13px; font-weight:600; color:#71717a; text-transform:uppercase; letter-spacing:0.8px; margin-bottom:16px; }
+.cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(160px,1fr)); gap:12px; margin-bottom:32px; }
+.card { background:#141416; border-radius:10px; padding:16px; border:1px solid #1f1f23; }
+.card .val { font-size:28px; font-weight:700; color:#fff; line-height:1.2; }
+.card .lbl { font-size:12px; color:#71717a; margin-top:4px; }
+.card-auto { border-left:3px solid #8b5cf6; }
+.card-lead { border-left:3px solid #3b82f6; }
+.card-msg { border-left:3px solid #22c55e; }
+.card-err { border-left:3px solid #ef4444; }
+.row { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:32px; }
+@media(max-width:768px){ .row { grid-template-columns:1fr; } }
+.panel { background:#141416; border-radius:10px; padding:20px; border:1px solid #1f1f23; }
+.timeline { max-height:400px; overflow-y:auto; }
+.timeline::-webkit-scrollbar { width:4px; }
+.timeline::-webkit-scrollbar-thumb { background:#27272a; border-radius:2px; }
+.event { display:flex; gap:12px; padding:8px 0; border-bottom:1px solid #1a1a1e; }
+.event:last-child { border-bottom:none; }
+.event-icon { width:28px; height:28px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:12px; flex-shrink:0; }
+.icon-scrape { background:#1e1b4b; color:#8b5cf6; }
+.icon-sent { background:#052e16; color:#22c55e; }
+.icon-reply { background:#1e0a3a; color:#d946ef; }
+.icon-error { background:#2e0a0a; color:#ef4444; }
+.event-body { flex:1; min-width:0; }
+.event-title { font-size:13px; font-weight:500; color:#e4e4e7; }
+.event-desc { font-size:12px; color:#71717a; margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+.event-time { font-size:11px; color:#52525b; margin-top:2px; }
+.bar { display:flex; align-items:center; margin-bottom:6px; }
+.bar .key { width:120px; font-size:12px; color:#a1a1aa; flex-shrink:0; }
+.bar .track { flex:1; height:16px; background:#1f1f23; border-radius:8px; overflow:hidden; }
+.bar .fill { height:100%; background:linear-gradient(90deg,#6366f1,#8b5cf6); border-radius:8px; transition:width .5s; }
+.bar .count { width:36px; text-align:right; font-size:12px; color:#71717a; margin-left:8px; flex-shrink:0; }
+table { width:100%; border-collapse:collapse; font-size:12px; }
+th { text-align:left; color:#71717a; font-weight:500; padding:6px 8px; border-bottom:1px solid #1f1f23; }
+td { padding:6px 8px; border-bottom:1px solid #16161a; color:#a1a1aa; }
+.badge { display:inline-block; padding:1px 6px; border-radius:4px; font-size:11px; font-weight:500; }
+.badge-new { background:#1e1b4b; color:#818cf8; }
+.badge-sent { background:#052e16; color:#4ade80; }
+.badge-replied { background:#1e0a3a; color:#d946ef; }
+.error { color:#ef4444; text-align:center; padding:40px; }
+.loading { text-align:center; padding:40px; color:#52525b; font-size:14px; }
+.empty { text-align:center; padding:20px; color:#52525b; font-size:13px; }
 </style>
 </head>
 <body>
-<h1>Morrnaire Dashboard</h1>
-<div id="app"><div class="loading">Loading...</div></div>
+<div class="header">
+  <h1>Morrnaire <span>Automation</span></h1>
+  <div class="header-right" id="lastUpdated"></div>
+</div>
+<div id="app"><div class="loading">Loading dashboard...</div></div>
 <script>
+const T = { scrape:'SCRAPE', sent:'SENT', reply:'REPLY', error:'ERROR' };
 async function load() {
   try {
     const r = await fetch('/api/stats');
     const d = await r.json();
-    if (d.error) { document.getElementById('app').innerHTML = '<div class="error">' + d.error + '</div>'; return; }
+    if (d.error) { document.getElementById('app').innerHTML = '<div class="error">'+d.error+'</div>'; return; }
+    document.getElementById('lastUpdated').textContent = 'Updated ' + new Date().toLocaleTimeString();
     document.getElementById('app').innerHTML = render(d);
   } catch(e) {
-    document.getElementById('app').innerHTML = '<div class="error">Failed to load: ' + e.message + '</div>';
+    document.getElementById('app').innerHTML = '<div class="error">Failed to load: '+e.message+'</div>';
   }
 }
 function render(d) {
+  const a = d.auto || {};
   return \`
+    <div class="section-title">Automation Overview</div>
     <div class="cards">
-      <div class="card"><div class="value">\${d.total}</div><div class="label">Total Leads</div></div>
-      <div class="card"><div class="value">\${d.byStatus.new || 0}</div><div class="label">New</div></div>
-      <div class="card"><div class="value">\${d.byStatus.sent || 0}</div><div class="label">Sent</div></div>
-      <div class="card"><div class="value">\${d.byStatus.replied || 0}</div><div class="label">Replied</div></div>
+      <div class="card card-auto"><div class="val">\${a.total_scrapes||0}</div><div class="lbl">Scrapes Run</div></div>
+      <div class="card card-auto"><div class="val">\${a.total_leads_found||0}</div><div class="lbl">Leads Found</div></div>
+      <div class="card card-msg"><div class="val">\${a.total_messages_sent||0}</div><div class="lbl">Messages Sent</div></div>
+      <div class="card card-msg"><div class="val">\${a.total_messages_replied||0}</div><div class="lbl">Replies Received</div></div>
+      <div class="card card-err"><div class="val">\${a.total_errors||0}</div><div class="lbl">Errors</div></div>
     </div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:24px">
-      <div class="panel"><h2>By City</h2>\${bars(d.byCity)}</div>
-      <div class="panel"><h2>By Niche</h2>\${bars(d.byNiche)}</div>
+    <div class="section-title">Leads Overview</div>
+    <div class="cards">
+      <div class="card card-lead"><div class="val">\${d.total}</div><div class="lbl">Total Leads</div></div>
+      <div class="card card-lead"><div class="val">\${d.byStatus.new||0}</div><div class="lbl">New</div></div>
+      <div class="card card-lead"><div class="val">\${d.byStatus.sent||0}</div><div class="lbl">Messaged</div></div>
+      <div class="card card-lead"><div class="val">\${d.byStatus.replied||0}</div><div class="lbl">Replied</div></div>
     </div>
-    <div class="panel"><h2>Recent Leads</h2>
-      <table><tr><th>Name</th><th>Phone</th><th>City</th><th>Status</th><th>Sent</th></tr>
-      \${d.recent.map(r => '<tr><td>' + esc(r.business_name) + '</td><td>' + esc(r.phone) + '</td><td>' + esc(r.city) + '</td><td><span class="badge badge-' + (r.status||'new') + '">' + esc(r.status) + '</span></td><td>' + esc(r.sent_at || '') + '</td></tr>').join('')}
-      </table>
+    <div class="row">
+      <div class="panel">
+        <div class="section-title">Activity Timeline</div>
+        <div class="timeline">\${renderTimeline(d.timeline||[])}</div>
+      </div>
+      <div class="panel">
+        <div class="section-title">Leads by City</div>
+        \${bars(d.byCity)}
+        <div class="section-title" style="margin-top:20px">Leads by Niche</div>
+        \${bars(d.byNiche)}
+      </div>
+    </div>
+    <div class="panel">
+      <div class="section-title">Recent Leads</div>
+      \${d.recent.length ? '<table><tr><th>Name</th><th>Phone</th><th>City</th><th>Status</th></tr>'+d.recent.map(r=>'<tr><td>'+esc(r.business_name)+'</td><td>'+esc(r.phone)+'</td><td>'+esc(r.city)+'</td><td><span class="badge badge-'+(r.status||'new')+'">'+esc(r.status||'new')+'</span></td></tr>').join('')+'</table>' : '<div class="empty">No leads yet</div>'}
     </div>
   \`;
 }
+function renderTimeline(events) {
+  if (!events.length) return '<div class="empty">No activity yet</div>';
+  return events.map(e => {
+    let icon, title, desc;
+    switch(e.type) {
+      case 'scrape_done': icon='S'; title='Scrape Complete'; desc=e.count+' leads found'+(e.source?' via '+e.source:''); break;
+      case 'scrape_start': icon='S'; title='Scrape Started'; desc=''; break;
+      case 'message_sent': icon='M'; title='Message Sent'; desc='To '+esc(e.to); break;
+      case 'message_replied': icon='R'; title='Reply Received'; desc='From '+esc(e.from)+': "'+esc(e.body)+'"'; break;
+      case 'error': icon='!'; title='Error'; desc=esc(e.message||e.context); break;
+      default: icon='?'; title=e.type; desc='';
+    }
+    const cls = e.type.includes('scrape')?'icon-scrape':e.type.includes('sent')?'icon-sent':e.type==='message_replied'?'icon-reply':'icon-error';
+    const t = new Date(e.time);
+    const timeStr = t.toLocaleDateString() + ' ' + t.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'});
+    return '<div class="event"><div class="event-icon '+cls+'">'+icon+'</div><div class="event-body"><div class="event-title">'+title+'</div><div class="event-desc">'+desc+'</div><div class="event-time">'+timeStr+'</div></div></div>';
+  }).join('');
+}
 function bars(obj) {
-  const entries = Object.entries(obj).sort((a,b) => b[1]-a[1]);
-  const max = Math.max(...entries.map(e => e[1]), 1);
-  return entries.map(([k,v]) => '<div class="bar"><div class="key">' + esc(k) + '</div><div class="track"><div class="fill" style="width:' + (v/max*100) + '%"></div></div><div class="count">' + v + '</div></div>').join('');
+  const entries = Object.entries(obj||{}).sort((a,b)=>b[1]-a[1]);
+  if (!entries.length) return '<div class="empty">No data</div>';
+  const max = Math.max(...entries.map(e=>e[1]),1);
+  return entries.map(([k,v]) => '<div class="bar"><div class="key">'+esc(k)+'</div><div class="track"><div class="fill" style="width:'+(v/max*100)+'%"></div></div><div class="count">'+v+'</div></div>').join('');
 }
 function esc(s) { return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 load();
+setInterval(load, 15000);
 </script>
 </body>
 </html>`);
@@ -272,6 +342,7 @@ async function appendToSheet(rows) {
 
 async function runDailyScrape() {
   console.log(`[Scheduler] Starting daily scrape at ${new Date().toISOString()}`);
+  tracker.add('scrape_start', {});
   try {
     const browser = waClient.pupBrowser;
     if (!browser) { console.log('[Scheduler] Browser not ready'); return; }
@@ -285,6 +356,7 @@ async function runDailyScrape() {
       }
     }
     console.log(`[Scheduler] Scraped ${allResults.length} leads total`);
+    tracker.add('scrape_done', { count: allResults.length, source: 'scheduled' });
 
     if (allResults.length > 0) {
       await appendToSheet(allResults);
@@ -300,6 +372,7 @@ async function runDailyScrape() {
     }
   } catch (err) {
     console.error('[Scheduler] Error:', err.message);
+    tracker.add('error', { context: 'scrape', message: err.message });
   }
 }
 
