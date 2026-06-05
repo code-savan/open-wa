@@ -5,48 +5,49 @@ function sleep(ms) {
 async function scrapeGoogleMaps({ browser, query, city, maxResults = 20 }) {
   const page = await browser.newPage();
 
-  const ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
-  await page.setUserAgent(ua);
-  await page.setExtraHTTPHeaders({ 'Accept-Language': 'en-US,en;q=0.9' });
-  page.setDefaultTimeout(30000);
+  // Minimize memory: block images, fonts, CSS
+  await page.setRequestInterception(true);
+  const blockedTypes = new Set(['image', 'stylesheet', 'font', 'media', 'other']);
+  page.on('request', req => {
+    if (blockedTypes.has(req.resourceType())) return req.abort();
+    req.continue();
+  });
+
+  await page.setViewport({ width: 800, height: 600 });
+  await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+  page.setDefaultTimeout(20000);
 
   const url = `https://www.google.com/maps/search/${encodeURIComponent(query + ' ' + city)}/`;
   try {
-    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 90000 });
+    await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 60000 });
   } catch (e) {
     console.log(`[Scraper] goto warning: ${e.message}`);
   }
+
   try {
-    await page.waitForSelector('a[href*="/maps/place/"], [role="feed"], .Nv2PK, .hfpxzc', { timeout: 20000 });
+    await page.waitForSelector('a[href*="/maps/place/"], [role="feed"]', { timeout: 15000 });
   } catch {}
-  await sleep(4000);
+  await sleep(3000);
 
   const results = [];
   let prevCount = 0;
-  let attempts = 0;
 
-  while (results.length < maxResults && attempts < 25) {
-    await sleep(2000);
+  for (let attempt = 0; attempt < 15 && results.length < maxResults; attempt++) {
+    await sleep(1500);
 
     const items = await page.evaluate(() => {
       const data = [];
-      const cards = document.querySelectorAll('a[href*="/maps/place/"], .Nv2PK, [role="feed"] > div > div, .nr2S1f');
+      const cards = document.querySelectorAll('a[href*="/maps/place/"], .Nv2PK, [role="feed"] > div > div');
       const seen = new Set();
       for (const card of cards) {
-        const nameEl = card.querySelector('.fontHeadlineSmall, .qBF1Pd, h3, [role="heading"]');
-        const name = nameEl?.textContent?.trim();
+        const name = card.querySelector('.fontHeadlineSmall, .qBF1Pd, h3')?.textContent?.trim();
         if (!name || seen.has(name)) continue;
         seen.add(name);
-
-        const phoneEl = card.querySelector('a[href^="tel:"]');
-        const phone = phoneEl?.getAttribute('href')?.replace('tel:', '')?.trim() || '';
-        const addrEl = card.querySelector('.W4Efsd, .Ahnjwc, .fontBodyMedium');
-        const address = addrEl?.textContent?.trim() || '';
-        const ratingEl = card.querySelector('[aria-label*="stars"], [role="img"][aria-label]');
-        const rating = ratingEl?.getAttribute('aria-label') || '';
-        const linkEl = card.querySelector('a[href*="maps/place"]');
-        const mapsUrl = linkEl?.getAttribute('href') || card.getAttribute('href') || '';
-        data.push({ name, phone, address, rating, mapsUrl });
+        const phone = card.querySelector('a[href^="tel:"]')?.getAttribute('href')?.replace('tel:', '')?.trim() || '';
+        const address = card.querySelector('.W4Efsd, .Ahnjwc')?.textContent?.trim() || '';
+        const rating = card.querySelector('[aria-label*="stars"]')?.getAttribute('aria-label') || '';
+        const link = card.querySelector('a[href*="maps/place"]')?.getAttribute('href') || card.getAttribute('href') || '';
+        data.push({ name, phone, address, rating, link });
       }
       return data;
     });
@@ -57,20 +58,17 @@ async function scrapeGoogleMaps({ browser, query, city, maxResults = 20 }) {
       const key = phone || item.name;
       if (results.some(r => (r.phone || r.business_name) === key)) continue;
       results.push({
-        business_name: item.name,
-        phone,
+        business_name: item.name, phone,
         address: item.address, rating: item.rating,
         city, niche: query,
-        google_maps_url: item.mapsUrl.startsWith('http') ? item.mapsUrl : `https://www.google.com${item.mapsUrl}`,
+        google_maps_url: item.link.startsWith('http') ? item.link : `https://www.google.com${item.link}`,
         status: 'new', source: 'scrape',
       });
     }
 
-    if (items.length === prevCount && attempts > 8) break;
+    if (items.length === prevCount && attempt > 5) break;
     prevCount = items.length;
-
-    try { await page.evaluate(() => { const f = document.querySelector('[role="feed"]'); if (f) f.scrollBy(0, 1200); window.scrollBy(0, 800); }); } catch {}
-    attempts++;
+    try { await page.evaluate(() => { const f = document.querySelector('[role="feed"]'); if (f) f.scrollBy(0, 800); window.scrollBy(0, 400); }); } catch {}
   }
 
   await page.close();
