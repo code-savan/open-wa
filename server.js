@@ -168,22 +168,95 @@ app.post('/scrape', async (req, res) => {
   }
 });
 
+function detectColumnMap(headerRow, dataRows) {
+  // Try exact header match first
+  const map = {};
+  EXPECTED_HEADERS.forEach(h => {
+    const idx = headerRow.findIndex(c => c.toLowerCase().trim() === h);
+    if (idx >= 0) map[h] = idx;
+  });
+  if (Object.keys(map).length >= 3) return map;
+
+  // Fuzzy match
+  EXPECTED_HEADERS.forEach(h => {
+    const idx = headerRow.findIndex(c => {
+      const col = c.toLowerCase().trim();
+      if (col === h) return true;
+      if (h === 'business_name' && (col.includes('name') || col.includes('business'))) return true;
+      if (h === 'phone' && (col.includes('phone') || col.includes('tel') || col.includes('mobile') || col.includes('number') || col.includes('whatsapp'))) return true;
+      if (h === 'address' && col.includes('address')) return true;
+      if (h === 'city' && (col.includes('city') || col.includes('town') || col.includes('lga'))) return true;
+      if (h === 'niche' && (col.includes('niche') || col.includes('category') || col.includes('type') || col.includes('service') || col.includes('industry'))) return true;
+      if (h === 'status' && col.includes('status')) return true;
+      if (h === 'rating' && (col.includes('rating') || col.includes('review') || col.includes('star'))) return true;
+      if (h === 'google_maps_url' && (col.includes('url') || col.includes('link') || col.includes('maps'))) return true;
+      if (h === 'source' && (col.includes('source') || col.includes('origin'))) return true;
+      return false;
+    });
+    if (idx >= 0 && !(h in map)) map[h] = idx;
+  });
+  if (Object.keys(map).length >= 3) return map;
+
+  // No headers detected — infer from data content
+  // Phone column: mostly digits, length 10-15
+  // Name column: mostly letters, length 3-100
+  // City column: matches known cities
+  // URL column: starts with http
+  if (dataRows.length > 0) {
+    const colScores = {};
+    const knownCities = ['lagos', 'abuja', 'ibadan', 'kano', 'port harcourt', 'enugu', 'owerri', 'benin', 'aba', 'onitsha', 'kaduna', 'ilorin', 'akure', 'jos', 'calabar', 'uyo', 'warri', 'sokoto', 'bauchi', 'maiduguri'];
+    for (let c = 0; c < Math.max(...dataRows.map(r => r.length), 5); c++) {
+      let digits = 0, letters = 0, total = 0, http = 0, cityMatch = 0;
+      dataRows.forEach(r => {
+        const v = (r[c] || '').trim();
+        if (!v) return;
+        total++;
+        const digitCount = (v.match(/[0-9]/g) || []).length;
+        const letterCount = (v.match(/[a-zA-Z]/g) || []).length;
+        if (digitCount > v.length * 0.6) digits++;
+        if (letterCount > v.length * 0.6) letters++;
+        if (v.startsWith('http')) http++;
+        if (knownCities.includes(v.toLowerCase())) cityMatch++;
+      });
+      if (total === 0) continue;
+      colScores[c] = { digits: digits/total, letters: letters/total, http: http/total, city: cityMatch/total };
+    }
+    // Assign best column for each header
+    const assigned = new Set();
+    EXPECTED_HEADERS.forEach(h => {
+      let best = -1, bestScore = 0;
+      Object.entries(colScores).forEach(([c, s]) => {
+        if (assigned.has(c)) return;
+        let score = 0;
+        if (h === 'phone') score = s.digits * 3;
+        else if (h === 'business_name') score = s.letters * 2;
+        else if (h === 'city') score = s.city * 5 + s.letters;
+        else if (h === 'google_maps_url') score = s.http * 5;
+        else if (h === 'address') score = s.letters * 1.5;
+        else if (h === 'niche') score = s.letters * 1.5;
+        if (score > bestScore) { bestScore = score; best = c; }
+      });
+      if (best >= 0) { map[h] = parseInt(best); assigned.add(parseInt(best)); }
+    });
+  }
+
+  // Final fallback: sequential
+  if (Object.keys(map).length < 3) {
+    EXPECTED_HEADERS.forEach((h, i) => {
+      if (i < headerRow.length && !(h in map)) map[h] = i;
+    });
+  }
+  return map;
+}
+
 app.post('/api/format-sheet', async (_req, res) => {
   try {
     const rows = await getSheetData(SHEET_ID);
-    let headerRow = rows[0] || [];
+    if (!rows.length) return res.json({ message: 'Sheet is empty', cleaned: 0 });
+
+    const headerRow = rows[0];
     const dataRows = rows.slice(1);
-
-    const headerMap = {};
-    EXPECTED_HEADERS.forEach(h => {
-      const idx = headerRow.findIndex(c => c.toLowerCase().trim() === h);
-      if (idx >= 0) headerMap[h] = idx;
-    });
-
-    // If detection failed, assume sequential order starting at col 0
-    if (Object.keys(headerMap).length < 3) {
-      EXPECTED_HEADERS.forEach((h, i) => { if (i < headerRow.length) headerMap[h] = i; });
-    }
+    const headerMap = detectColumnMap(headerRow, dataRows);
 
     const cleaned = dataRows.map(row => {
       const obj = {};
@@ -192,9 +265,9 @@ app.post('/api/format-sheet', async (_req, res) => {
         let val = (idx !== undefined && idx < row.length) ? String(row[idx] || '') : '';
         if (h === 'phone') {
           val = val.replace(/[^0-9]/g, '');
-          if (val.length > 11 && val.startsWith('234')) val = val.slice(-11);
-          if (val.length === 11 && val.startsWith('0')) val = '234' + val.slice(1);
-          if (val.length === 10) val = '234' + val;
+          if (val.length === 13 && val.startsWith('234')) {}
+          else if (val.length === 11 && val.startsWith('0')) val = '234' + val.slice(1);
+          else if (val.length === 10) val = '234' + val;
         }
         if (h === 'business_name') val = val.trim();
         if (h === 'scraped_at' && !val) val = new Date().toISOString();
