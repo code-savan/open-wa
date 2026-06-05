@@ -43,9 +43,24 @@ async function scrapeGoogleMaps({ browser, query, city, maxResults = 20 }) {
         const name = card.querySelector('.fontHeadlineSmall, .qBF1Pd, h3')?.textContent?.trim();
         if (!name || seen.has(name)) continue;
         seen.add(name);
+
         const phone = card.querySelector('a[href^="tel:"]')?.getAttribute('href')?.replace('tel:', '')?.trim() || '';
-        const address = card.querySelector('.W4Efsd, .Ahnjwc')?.textContent?.trim() || '';
-        const rating = card.querySelector('[aria-label*="stars"]')?.getAttribute('aria-label') || '';
+
+        let address = '';
+        const addrEl = card.querySelector('[itemprop="address"], .Ahnjwc, .W4Efsd');
+        if (addrEl) {
+          const t = addrEl.textContent.trim();
+          if (t.includes(',') || t.includes(' ') && t.length > 8) address = t;
+        }
+
+        let rating = '';
+        const rEl = card.querySelector('[role="img"][aria-label*="star"], [aria-label*="stars"]');
+        if (rEl) rating = rEl.getAttribute('aria-label') || '';
+        else {
+          const r2 = card.querySelector('.MW4etd');
+          if (r2) rating = r2.textContent.trim();
+        }
+
         const link = card.querySelector('a[href*="maps/place"]')?.getAttribute('href') || card.getAttribute('href') || '';
         data.push({ name, phone, address, rating, link });
       }
