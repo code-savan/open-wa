@@ -4,9 +4,9 @@ const cors = require('cors');
 const qrcode = require('qrcode-terminal');
 const { scrapeGoogleMaps } = require('./scraper');
 const { getSheetData } = require('./dashboard');
-const { google } = require('googleapis');
 const tracker = require('./tracker');
 const QRCode = require('qrcode');
+const { appendRows, writeRange } = require('./sheet-utils');
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -163,6 +163,81 @@ app.post('/scrape', async (req, res) => {
       await appendToSheet(allResults).catch(e => console.log('[Scrape] Sheet append error:', e.message));
     }
     res.json({ count: allResults.length, results: allResults });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/format-sheet', async (_req, res) => {
+  try {
+    const rows = await getSheetData(SHEET_ID);
+    if (!rows.length) return res.json({ message: 'Sheet is empty', cleaned: 0 });
+
+    // Detect headers from first row or use defaults
+    let headerRow = rows[0];
+    const dataRows = rows.slice(1);
+
+    // Try to detect which column is which based on content
+    const headerMap = {};
+    EXPECTED_HEADERS.forEach(h => {
+      // Find matching column index
+      const idx = headerRow.findIndex((c, i) => {
+        const col = c.toLowerCase().trim();
+        if (col === h) return true;
+        if (h === 'business_name' && (col.includes('name') || col.includes('business'))) return true;
+        if (h === 'phone' && (col.includes('phone') || col.includes('tel') || col.includes('mobile'))) return true;
+        if (h === 'address' && col.includes('address')) return true;
+        if (h === 'city' && col.includes('city')) return true;
+        if (h === 'niche' && (col.includes('niche') || col.includes('category') || col.includes('type'))) return true;
+        if (h === 'status' && col.includes('status')) return true;
+        if (h === 'source' && col.includes('source')) return true;
+        return false;
+      });
+      if (idx >= 0) headerMap[h] = idx;
+    });
+
+    // If we couldn't detect headers, try to infer from data shape
+    if (Object.keys(headerMap).length < 3) {
+      // Assume columns are in EXPECTED_HEADERS order
+      EXPECTED_HEADERS.forEach((h, i) => {
+        if (i < headerRow.length) headerMap[h] = i;
+      });
+    }
+
+    // Build cleaned data
+    const cleaned = dataRows.map(row => {
+      const obj = {};
+      EXPECTED_HEADERS.forEach(h => {
+        const idx = headerMap[h];
+        let val = (idx !== undefined && idx < row.length) ? String(row[idx] || '') : '';
+        // Clean phone numbers
+        if (h === 'phone') {
+          val = val.replace(/[^0-9]/g, '');
+          if (val.length > 11) val = val.slice(-11);
+          if (val.length === 11 && val.startsWith('0')) val = '+234' + val.slice(1);
+        }
+        if (h === 'business_name') val = val.trim();
+        if (h === 'scraped_at' && !val) val = new Date().toISOString();
+        obj[h] = val;
+      });
+      return obj;
+    }).filter(r => r.business_name);
+
+    // Build output rows
+    const outputRows = [EXPECTED_HEADERS];
+    cleaned.forEach(r => {
+      outputRows.push(EXPECTED_HEADERS.map(h => r[h]));
+    });
+
+    // Write back to sheet (clear and rewrite)
+    await writeRange(SHEET_ID, 'Sheet1!A1', outputRows);
+
+    res.json({
+      message: 'Sheet formatted',
+      headers_detected: headerMap,
+      total_rows: rows.length,
+      cleaned_rows: cleaned.length,
+    });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -350,30 +425,15 @@ const NICHES = ['beauty spa', 'barber shop', 'private dental clinic', 'suya spot
 
 const SHEET_ID = '1TkWu6TTLaImjFliOKOPS0AYznmf45TWEJSeEfNORguc';
 
+const EXPECTED_HEADERS = ['business_name','phone','address','rating','city','niche','google_maps_url','status','source','scraped_at'];
+
 async function appendToSheet(rows) {
-  const raw = process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
-  if (!raw) { console.log('[Sheets] No credentials configured'); return; }
-  let sa;
-  try { sa = JSON.parse(raw); }
-  catch { sa = JSON.parse(Buffer.from(raw, 'base64').toString()); }
-
-  const auth = new google.auth.JWT(sa.client_email, null, sa.private_key, ['https://www.googleapis.com/auth/spreadsheets']);
-  const sheets = google.sheets({ version: 'v4', auth });
-
-  const headers = ['business_name','phone','address','rating','city','niche','google_maps_url','status','source','scraped_at'];
-  const values = rows.map(r => headers.map(h => {
+  const values = rows.map(r => EXPECTED_HEADERS.map(h => {
     let v = r[h] || '';
     if (h === 'scraped_at') v = new Date().toISOString();
     return String(v);
   }));
-
-  await sheets.spreadsheets.values.append({
-    spreadsheetId: SHEET_ID,
-    range: 'Sheet1',
-    valueInputOption: 'USER_ENTERED',
-    insertDataOption: 'INSERT_ROWS',
-    requestBody: { values },
-  });
+  await appendRows(SHEET_ID, values);
   console.log(`[Sheets] Appended ${values.length} rows`);
 }
 
