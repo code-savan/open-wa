@@ -171,50 +171,30 @@ app.post('/scrape', async (req, res) => {
 app.post('/api/format-sheet', async (_req, res) => {
   try {
     const rows = await getSheetData(SHEET_ID);
-    if (!rows.length) return res.json({ message: 'Sheet is empty', cleaned: 0 });
-
-    // Detect headers from first row or use defaults
-    let headerRow = rows[0];
+    let headerRow = rows[0] || [];
     const dataRows = rows.slice(1);
 
-    // Try to detect which column is which based on content
     const headerMap = {};
     EXPECTED_HEADERS.forEach(h => {
-      // Find matching column index
-      const idx = headerRow.findIndex((c, i) => {
-        const col = c.toLowerCase().trim();
-        if (col === h) return true;
-        if (h === 'business_name' && (col.includes('name') || col.includes('business'))) return true;
-        if (h === 'phone' && (col.includes('phone') || col.includes('tel') || col.includes('mobile'))) return true;
-        if (h === 'address' && col.includes('address')) return true;
-        if (h === 'city' && col.includes('city')) return true;
-        if (h === 'niche' && (col.includes('niche') || col.includes('category') || col.includes('type'))) return true;
-        if (h === 'status' && col.includes('status')) return true;
-        if (h === 'source' && col.includes('source')) return true;
-        return false;
-      });
+      const idx = headerRow.findIndex(c => c.toLowerCase().trim() === h);
       if (idx >= 0) headerMap[h] = idx;
     });
 
-    // If we couldn't detect headers, try to infer from data shape
+    // If detection failed, assume sequential order starting at col 0
     if (Object.keys(headerMap).length < 3) {
-      // Assume columns are in EXPECTED_HEADERS order
-      EXPECTED_HEADERS.forEach((h, i) => {
-        if (i < headerRow.length) headerMap[h] = i;
-      });
+      EXPECTED_HEADERS.forEach((h, i) => { if (i < headerRow.length) headerMap[h] = i; });
     }
 
-    // Build cleaned data
     const cleaned = dataRows.map(row => {
       const obj = {};
       EXPECTED_HEADERS.forEach(h => {
         const idx = headerMap[h];
         let val = (idx !== undefined && idx < row.length) ? String(row[idx] || '') : '';
-        // Clean phone numbers
         if (h === 'phone') {
           val = val.replace(/[^0-9]/g, '');
-          if (val.length > 11) val = val.slice(-11);
-          if (val.length === 11 && val.startsWith('0')) val = '+234' + val.slice(1);
+          if (val.length > 11 && val.startsWith('234')) val = val.slice(-11);
+          if (val.length === 11 && val.startsWith('0')) val = '234' + val.slice(1);
+          if (val.length === 10) val = '234' + val;
         }
         if (h === 'business_name') val = val.trim();
         if (h === 'scraped_at' && !val) val = new Date().toISOString();
@@ -223,13 +203,8 @@ app.post('/api/format-sheet', async (_req, res) => {
       return obj;
     }).filter(r => r.business_name);
 
-    // Build output rows
     const outputRows = [EXPECTED_HEADERS];
-    cleaned.forEach(r => {
-      outputRows.push(EXPECTED_HEADERS.map(h => r[h]));
-    });
-
-    // Write back to sheet (clear and rewrite)
+    cleaned.forEach(r => outputRows.push(EXPECTED_HEADERS.map(h => r[h])));
     await writeRange(SHEET_ID, 'Sheet1!A1', outputRows);
 
     res.json({
@@ -238,6 +213,15 @@ app.post('/api/format-sheet', async (_req, res) => {
       total_rows: rows.length,
       cleaned_rows: cleaned.length,
     });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.post('/api/reset-sheet', async (_req, res) => {
+  try {
+    await writeRange(SHEET_ID, 'Sheet1!A1', [EXPECTED_HEADERS]);
+    res.json({ message: 'Sheet reset to clean headers', headers: EXPECTED_HEADERS });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
