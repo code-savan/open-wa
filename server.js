@@ -159,6 +159,9 @@ app.post('/scrape', async (req, res) => {
       await sleep(3000 + Math.random() * 2000);
     }
     tracker.add('scrape_done', { count: allResults.length, queries });
+    if (allResults.length > 0) {
+      await appendToSheet(allResults).catch(e => console.log('[Scrape] Sheet append error:', e.message));
+    }
     res.json({ count: allResults.length, results: allResults });
   } catch (err) {
     res.status(500).json({ error: err.message });
