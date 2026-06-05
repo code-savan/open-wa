@@ -52,4 +52,13 @@ async function getSheetInfo(sheetId) {
   return res.data;
 }
 
-module.exports = { getSheetData, appendRows, writeRange, getSheetInfo };
+async function clearSheet(sheetId, range) {
+  const auth = await getClient(['https://www.googleapis.com/auth/spreadsheets']);
+  const sheets = google.sheets({ version: 'v4', auth });
+  await sheets.spreadsheets.values.clear({
+    spreadsheetId: sheetId,
+    range: range || 'Sheet1',
+  });
+}
+
+module.exports = { getSheetData, appendRows, writeRange, getSheetInfo, clearSheet };

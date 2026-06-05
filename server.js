@@ -6,7 +6,7 @@ const { scrapeGoogleMaps } = require('./scraper');
 const { getSheetData } = require('./dashboard');
 const tracker = require('./tracker');
 const QRCode = require('qrcode');
-const { appendRows, writeRange } = require('./sheet-utils');
+const { appendRows, writeRange, clearSheet } = require('./sheet-utils');
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -203,6 +203,7 @@ app.post('/api/format-sheet', async (_req, res) => {
       return obj;
     }).filter(r => r.business_name);
 
+    await clearSheet(SHEET_ID);
     const outputRows = [EXPECTED_HEADERS];
     cleaned.forEach(r => outputRows.push(EXPECTED_HEADERS.map(h => r[h])));
     await writeRange(SHEET_ID, 'Sheet1!A1', outputRows);
@@ -220,6 +221,7 @@ app.post('/api/format-sheet', async (_req, res) => {
 
 app.post('/api/reset-sheet', async (_req, res) => {
   try {
+    await clearSheet(SHEET_ID);
     await writeRange(SHEET_ID, 'Sheet1!A1', [EXPECTED_HEADERS]);
     res.json({ message: 'Sheet reset to clean headers', headers: EXPECTED_HEADERS });
   } catch (err) {
