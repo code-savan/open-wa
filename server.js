@@ -6,7 +6,7 @@ const { scrapeGoogleMaps } = require('./scraper');
 const { getSheetData } = require('./dashboard');
 const tracker = require('./tracker');
 const QRCode = require('qrcode');
-const { appendRows, writeRange, clearSheet } = require('./sheet-utils');
+const { appendRows, writeRange, clearSheet, getSheetInfo } = require('./sheet-utils');
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -297,6 +297,26 @@ app.post('/api/reset-sheet', async (_req, res) => {
     await clearSheet(SHEET_ID);
     await writeRange(SHEET_ID, 'Sheet1!A1', [EXPECTED_HEADERS]);
     res.json({ message: 'Sheet reset to clean headers', headers: EXPECTED_HEADERS });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/sheet-info', async (_req, res) => {
+  try {
+    const info = await getSheetInfo('1TkWu6TTLaImjFliOKOPS0AYznmf45TWEJSeEfNORguc');
+    const sheets = (info.sheets || []).map(s => ({
+      title: s.properties.title,
+      rows: s.properties.gridProperties.rowCount,
+      cols: s.properties.gridProperties.columnCount,
+    }));
+    // Read first 5 rows from each sheet
+    const preview = {};
+    for (const s of sheets) {
+      const data = await getSheetData('1TkWu6TTLaImjFliOKOPS0AYznmf45TWEJSeEfNORguc', `${s.title}!A1:Z5`);
+      preview[s.title] = data;
+    }
+    res.json({ sheets, preview });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
