@@ -123,9 +123,8 @@ const waClient = new Client({
 });
 
 app.post('/api/run-today', async (_req, res) => {
-  const target = _req.body?.target || 50;
   if (!client) return res.status(503).json({ error: 'WhatsApp not ready' });
-  const result = await autoSender.startAutomation(client, target);
+  const result = await autoSender.startAutomation(client);
   res.json(result);
 });
 
@@ -138,6 +137,7 @@ waClient.on('ready', () => {
   client = waClient;
   qrCodeString = null;
   console.log('WhatsApp client is ready!');
+  autoSender.startTicker(client);
 });
 
 waClient.on('message', async (msg) => {
@@ -437,30 +437,37 @@ async function load() {
   }
 }
 
-function render(d, auto) {
-  const a = d.auto || {};
-  // Status badge
-  const st = !auto.running && auto.completed ? 'completed' : auto.running ? 'sending' : 'waiting';
-  const stColor = st === 'completed' ? '#22c55e' : st === 'sending' ? '#8b5cf6' : '#f59e0b';
-  const stLabel = st === 'completed' ? 'Completed' : st === 'sending' ? 'Sending...' : 'Waiting';
-  const pct = auto.total > 0 ? Math.round(auto.sent / auto.total * 100) : 0;
+function render(d, a) {
+  const auto = a;
+  const pct = auto.dailyCap > 0 ? Math.round(auto.sent / auto.dailyCap * 100) : 0;
+  const statusColors = { idle:'#f59e0b', sending:'#8b5cf6', cooldown:'#3b82f6', completed:'#22c55e', weekend:'#71717a', outside_window:'#71717a', no_leads:'#ef4444' };
+  const sc = statusColors[auto.sendStatus] || '#f59e0b';
+  const statusLabels = { idle:'Waiting', sending:'Sending...', cooldown:'Cooldown', completed:'Done ✓', weekend:'Weekend Off', outside_window:'Outside Window', no_leads:'No Leads' };
+  const sl = statusLabels[auto.sendStatus] || 'Idle';
+  const nextTime = auto.nextAction ? new Date(auto.nextAction).toLocaleTimeString() : '—';
 
   return \`
-    <div class="section-title">Today's Send Status</div>
+    <div class="section-title">Warming Schedule — Week \${auto.warmingWeek} of \${auto.maxWarmingWeek}</div>
     <div class="cards">
-      <div class="card card-auto"><div class="val" style="color:\${stColor}">\${stLabel}</div><div class="lbl">Status</div></div>
-      <div class="card card-msg"><div class="val">\${auto.sent||0} / \${auto.total||0}</div><div class="lbl">Messages Sent Today</div></div>
-      <div class="card card-msg"><div class="val">\${a.total_messages_sent||0}</div><div class="lbl">All-Time Sent</div></div>
-      <div class="card card-err"><div class="val">\${a.total_errors||0}</div><div class="lbl">Failed</div></div>
+      <div class="card card-auto"><div class="val" style="color:\${sc}">\${sl}</div><div class="lbl">\${auto.day} — Status</div></div>
+      <div class="card card-msg"><div class="val">\${auto.sent} / \${auto.dailyCap}</div><div class="lbl">Today's Cap</div></div>
+      <div class="card card-msg"><div class="val">\${auto.window}</div><div class="lbl">Send Window</div></div>
+      <div class="card card-auto"><div class="val">\${auto.remaining}</div><div class="lbl">Remaining Today</div></div>
     </div>
     <div style="background:#141416;border-radius:10px;padding:20px;border:1px solid #1f1f23;margin-bottom:32px">
       <div style="display:flex;justify-content:space-between;font-size:12px;color:#71717a;margin-bottom:6px">
-        <span>Progress</span><span>\${auto.sent||0} of \${auto.total||0}</span>
+        <span>Progress</span><span>\${auto.sent} / \${auto.dailyCap}</span>
       </div>
       <div style="height:8px;background:#1f1f23;border-radius:4px;overflow:hidden">
         <div style="height:100%;width:\${pct}%;background:linear-gradient(90deg,#6366f1,#8b5cf6);border-radius:4px;transition:width 1s"></div>
       </div>
-      \${auto.current && auto.current !== 'completed' && auto.current !== 'waiting' ? '<div style="margin-top:8px;font-size:12px;color:#52525b">Currently: '+esc(auto.current)+'</div>' : ''}
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px;font-size:12px;color:#52525b">
+        <div>Batch: <span style="color:#a1a1aa">\${auto.batchSize} msgs</span></div>
+        <div>Gap: <span style="color:#a1a1aa">\${auto.gapRange}</span></div>
+        <div>Cooldown: <span style="color:#a1a1aa">\${auto.cooldownRange}</span></div>
+        <div>Next: <span style="color:#a1a1aa">\${nextTime}</span></div>
+      </div>
+      \${auto.current && !auto.current.includes('idle') ? '<div style="margin-top:8px;font-size:12px;color:#52525b">'+esc(auto.current)+'</div>' : ''}
     </div>
     <div class="section-title">Leads by Niche</div>
     <div class="cards" id="nicheCards"></div>
@@ -538,20 +545,4 @@ app.listen(PORT, '0.0.0.0', () => {
   if (N8N_WEBHOOK_URL) console.log(`N8N Webhook: ${N8N_WEBHOOK_URL}`);
 });
 
-// Daily scheduler: check every minute for 9AM Lagos time
-setInterval(() => {
-  const now = new Date();
-  const lagosHour = (now.getUTCHours() + 1) % 24;
-  const lagosMin = now.getMinutes();
-  if (lagosHour === 9 && lagosMin === 0 && client) {
-    const today = new Date().toISOString().slice(0, 10);
-    const status = autoSender.getStatus();
-    if (status.date !== today) {
-      console.log('[Scheduler] Starting daily automation at 9AM Lagos');
-      autoSender.startAutomation(client, 50).then(r => {
-        console.log('[Scheduler] Daily automation result:', JSON.stringify(r));
-      });
-    }
-  }
-}, 60000);
-console.log('[Scheduler] Daily automation will run at 9:00 AM Lagos time');
+console.log(`[Scheduler] Warming starts Monday ${autoSender.WARMING_START}, auto-ticker handles 60s checks`);
