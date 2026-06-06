@@ -285,7 +285,7 @@ app.post('/api/create-sheets', async (_req, res) => {
       'Hotel & Lodge',
       'Photography',
     ];
-    const headers = ['Name', 'Niche', 'Phone', 'Location', 'Status'];
+    const headers = ['Name', 'Niche', 'Phone', 'Location', 'status'];
     const created = [];
     for (const niche of niches) {
       try {
