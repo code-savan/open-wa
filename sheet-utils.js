@@ -61,4 +61,27 @@ async function clearSheet(sheetId, range) {
   });
 }
 
-module.exports = { getSheetData, appendRows, writeRange, getSheetInfo, clearSheet };
+async function addSheet(sheetId, title) {
+  const auth = await getClient(['https://www.googleapis.com/auth/spreadsheets']);
+  const sheets = google.sheets({ version: 'v4', auth });
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: sheetId,
+    requestBody: {
+      requests: [{ addSheet: { properties: { title } } }],
+    },
+  });
+}
+
+async function ensureSheetWithHeaders(sheetId, title, headers) {
+  try {
+    await getSheetData(sheetId, `${title}!A1:Z1`);
+  } catch {
+    await addSheet(sheetId, title);
+  }
+  const existing = await getSheetData(sheetId, `${title}!A1:Z1`);
+  if (!existing.length || existing[0].length === 0) {
+    await writeRange(sheetId, `${title}!A1`, [headers]);
+  }
+}
+
+module.exports = { getSheetData, appendRows, writeRange, getSheetInfo, clearSheet, addSheet, ensureSheetWithHeaders };

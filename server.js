@@ -2,11 +2,11 @@ const { Client, LocalAuth } = require('whatsapp-web.js');
 const express = require('express');
 const cors = require('cors');
 const qrcode = require('qrcode-terminal');
-const { scrapeGoogleMaps } = require('./scraper');
 const { getSheetData } = require('./dashboard');
 const tracker = require('./tracker');
 const QRCode = require('qrcode');
-const { appendRows, writeRange, clearSheet, getSheetInfo } = require('./sheet-utils');
+const { appendRows, writeRange, clearSheet, getSheetInfo, addSheet, ensureSheetWithHeaders } = require('./sheet-utils');
+const { normalizePhone, parsePhones } = require('./phone-utils');
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -18,6 +18,80 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
 const WEBHOOK_URL = process.env.WEBHOOK_URL;
+const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL;
+
+// In-memory tracking of sent msg1: phone -> { business_name, niche, sheet }
+const sentMessages = new Map();
+
+const MSG2_TEMPLATES = {
+  spa: `Thanks for responding! I'm Marvellous from Morrnaire (morrnaire.com.ng) — we build professional websites for beauty businesses here in [City]. A few salons we've worked with started getting more bookings and walk-ins within weeks of going live. 
+
+We actually went ahead and built a quick demo site for [BusinessName] — no cost to you, no obligation. Mind if I send it over? Takes 30 seconds to view. 🙏`,
+  law: `Appreciate you getting back! I'm Marvellous from Morrnaire (morrnaire.com.ng). We build clean, trust-first websites for law firms and chambers across Nigeria. Clients who had no web presence before us have told us it changed how serious prospects perceive them. 
+
+We put together a quick demo site for [BusinessName] — completely free, no strings. Would you like me to send the link? 🙏`,
+  realestate: `Appreciate you getting back! I'm Marvellous from Morrnaire (morrnaire.com.ng). We build clean, trust-first websites for law firms and chambers across Nigeria. Clients who had no web presence before us have told us it changed how serious prospects perceive them. 
+
+We put together a quick demo site for [BusinessName] — completely free, no strings. Would you like me to send the link? 🙏`,
+  restaurant: `Thanks for responding! I'm Marvellous from Morrnaire (morrnaire.com.ng) — we build professional websites for restaurants and food businesses here in [City]. A few places we've worked with started getting more orders and walk-ins within weeks of going live.
+
+We actually went ahead and built a quick demo site for [BusinessName] — no cost to you, no obligation. Mind if I send it over? Takes 30 seconds to view. 🙏`,
+  gym: `Thanks for getting back! I'm Marvellous from Morrnaire (morrnaire.com.ng) — we build professional websites for fitness businesses here in [City]. Gyms we've worked with have told us their membership sign-ups went up after going live.
+
+We actually went ahead and built a quick demo site for [BusinessName] — completely free, no strings. Mind if I send the link? 🙏`,
+  fashion: `Thanks for responding! I'm Marvellous from Morrnaire (morrnaire.com.ng) — we build beautiful catalog websites for fashion brands here in [City]. Boutiques we've worked with started getting more enquiries and orders within weeks.
+
+We actually went ahead and built a quick demo site for [BusinessName] — no cost, no obligation. Mind if I send it over? 🙏`,
+  hotel: `Thanks for getting back! I'm Marvellous from Morrnaire (morrnaire.com.ng) — we build booking-ready websites for hotels and lodges here in [City]. Properties we've worked with started getting more direct bookings after going live.
+
+We put together a quick demo site for [BusinessName] — completely free, no strings. Would you like me to send the link? 🙏`,
+  photography: `Thanks for responding! I'm Marvellous from Morrnaire (morrnaire.com.ng) — we build stunning portfolio websites for photographers here in [City]. Photographers we've worked with tell us they book more clients since going live.
+
+We actually went ahead and built a quick demo site for [BusinessName] — no cost, no obligation. Mind if I send it over? 🙏`,
+};
+
+function getMsg2Template(niche, businessName, location) {
+  const key = (niche || '').toLowerCase();
+  let tmpl = MSG2_TEMPLATES.spa;
+  if (key.includes('law') || key.includes('chamber') || key.includes('legal')) tmpl = MSG2_TEMPLATES.law;
+  else if (key.includes('real') || key.includes('estate') || key.includes('property')) tmpl = MSG2_TEMPLATES.realestate;
+  else if (key.includes('restaurant') || key.includes('food') || key.includes('catering')) tmpl = MSG2_TEMPLATES.restaurant;
+  else if (key.includes('gym') || key.includes('fitness') || key.includes('gym')) tmpl = MSG2_TEMPLATES.gym;
+  else if (key.includes('fashion') || key.includes('boutique') || key.includes('cloth')) tmpl = MSG2_TEMPLATES.fashion;
+  else if (key.includes('hotel') || key.includes('lodge') || key.includes('guest')) tmpl = MSG2_TEMPLATES.hotel;
+  else if (key.includes('photo') || key.includes('photo') || key.includes('video')) tmpl = MSG2_TEMPLATES.photography;
+  return tmpl.replace(/\[BusinessName\]/g, businessName || 'your business')
+             .replace(/\[City\]/g, location || 'Nigeria');
+}
+
+function lookupPhoneInSheet(rows, phoneRaw) {
+  const phone = normalizePhone(phoneRaw);
+  if (!phone) return null;
+  const headers = rows[0];
+  const nameIdx = headers.findIndex(h => /name/i.test(h));
+  const phoneIdx = headers.findIndex(h => /phone|tel|mobile|number|whatsapp/i.test(h));
+  const nicheIdx = headers.findIndex(h => /niche|category|type|service|industry/i.test(h));
+  const locationIdx = headers.findIndex(h => /location|city|town|address/i.test(h));
+  const statusIdx = headers.findIndex(h => /status/i.test(h));
+  if (phoneIdx < 0) return null;
+
+  for (let r = 1; r < rows.length; r++) {
+    const phones = parsePhones(rows[r][phoneIdx] || '');
+    if (phones.includes(phone)) {
+      return {
+        row: r,
+        business_name: nameIdx >= 0 ? (rows[r][nameIdx] || '') : '',
+        niche: nicheIdx >= 0 ? (rows[r][nicheIdx] || '') : '',
+        location: locationIdx >= 0 ? (rows[r][locationIdx] || '') : '',
+        status: statusIdx >= 0 ? (rows[r][statusIdx] || '') : '',
+        phoneIdx,
+        statusIdx,
+        phone,
+      };
+    }
+  }
+  return null;
+}
 
 let client = null;
 let qrCodeString = null;
@@ -64,10 +138,56 @@ waClient.on('message', async (msg) => {
   const isFromMe = msg.fromMe || msg._data?.fromMe;
   if (!isFromMe) {
     tracker.add('message_replied', { from: msg.from, body: msg.body.slice(0, 50) });
+
+    // Check if this is a lead who received msg1 → auto-send msg2
+    try {
+      const senderPhone = msg.from.replace('@c.us', '').replace('@g.us', '');
+      let leadInfo = sentMessages.get(senderPhone);
+
+      if (!leadInfo) {
+        // Fallback: scan all sheets for this phone
+        const sheetId = process.env.SHEET_ID || '1TkWu6TTLaImjFliOKOPS0AYznmf45TWEJSeEfNORguc';
+        const info = await getSheetInfo(sheetId);
+        for (const s of (info.sheets || [])) {
+          const title = s.properties.title;
+          const rows = await getSheetData(sheetId, `${title}!A1:Z${Math.min(s.properties.gridProperties.rowCount, 200)}`);
+          if (rows.length < 2) continue;
+          const found = lookupPhoneInSheet(rows, senderPhone);
+          if (found && found.status === 'msg1_sent') {
+            leadInfo = { ...found, sheet: title };
+            break;
+          }
+        }
+      }
+
+      if (leadInfo && leadInfo.status === 'msg1_sent') {
+        const msg2 = getMsg2Template(leadInfo.niche, leadInfo.business_name, leadInfo.location);
+        const waId = `${senderPhone}@c.us`;
+        await client.sendMessage(waId, msg2);
+        tracker.add('message_sent', { to: senderPhone, body: msg2.slice(0, 50), type: 'msg2' });
+        console.log(`[Auto] Sent msg2 to ${senderPhone} (${leadInfo.business_name})`);
+
+        // Update sheet status
+        if (leadInfo.sheet && leadInfo.statusIdx >= 0) {
+          try {
+            const sheetId = process.env.SHEET_ID || '1TkWu6TTLaImjFliOKOPS0AYznmf45TWEJSeEfNORguc';
+            await writeRange(sheetId, `${leadInfo.sheet}!${String.fromCharCode(65 + leadInfo.statusIdx)}${leadInfo.row + 1}`, [['msg2_sent']]);
+          } catch (e) {
+            console.log('[Auto] Failed to update sheet status:', e.message);
+          }
+        }
+        sentMessages.delete(senderPhone);
+      }
+    } catch (e) {
+      console.log('[Auto] Reply handler error:', e.message);
+    }
   }
-  if (!WEBHOOK_URL) return;
+
+  // Forward to n8n webhook
+  if (!WEBHOOK_URL && !N8N_WEBHOOK_URL) return;
+  const hookUrl = N8N_WEBHOOK_URL || WEBHOOK_URL;
   try {
-    await fetch(WEBHOOK_URL, {
+    await fetch(hookUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -122,7 +242,7 @@ app.get('/qr-page', async (_req, res) => {
 });
 
 app.post('/send', async (req, res) => {
-  const { phone, message } = req.body;
+  const { phone, message, business_name, niche, location, sheet } = req.body;
   if (!phone || !message) {
     return res.status(400).json({ error: 'phone and message are required' });
   }
@@ -130,173 +250,52 @@ app.post('/send', async (req, res) => {
     return res.status(503).json({ error: 'WhatsApp not ready yet' });
   }
   try {
-    const formatted = phone.includes('@c.us') ? phone : `${phone}@c.us`;
-    await client.sendMessage(formatted, message);
-    tracker.add('message_sent', { to: phone, body: message.slice(0, 50) });
-    res.json({ success: true, to: phone });
+    const phones = parsePhones(phone);
+    if (!phones.length) {
+      return res.status(400).json({ error: 'No valid phone numbers found', original: phone });
+    }
+
+    const results = [];
+    for (const p of phones) {
+      try {
+        const waId = `${p}@c.us`;
+        await client.sendMessage(waId, message);
+        sentMessages.set(p, { business_name: business_name || '', niche: niche || '', location: location || '', sheet: sheet || '' });
+        tracker.add('message_sent', { to: p, body: message.slice(0, 50) });
+        results.push({ phone: p, success: true });
+        // Small delay between sending to multiple numbers
+        await new Promise(r => setTimeout(r, 500));
+      } catch (e) {
+        results.push({ phone: p, success: false, error: e.message });
+      }
+    }
+    res.json({ success: true, results });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.post('/scrape', async (req, res) => {
-  const { queries = [], maxPerQuery = 15 } = req.body;
-  if (!queries.length) {
-    return res.status(400).json({ error: 'queries array required' });
-  }
-  if (!client) {
-    return res.status(503).json({ error: 'WhatsApp not ready yet' });
-  }
+app.post('/api/create-sheets', async (_req, res) => {
   try {
-    const browser = waClient.pupBrowser;
-    if (!browser) {
-      return res.status(503).json({ error: 'Browser not ready' });
+    const sheetId = process.env.SHEET_ID || '1TkWu6TTLaImjFliOKOPS0AYznmf45TWEJSeEfNORguc';
+    const niches = [
+      'Restaurant',
+      'Gym & Fitness',
+      'Fashion Boutique',
+      'Hotel & Lodge',
+      'Photography',
+    ];
+    const headers = ['Name', 'Niche', 'Phone', 'Location', 'Status'];
+    const created = [];
+    for (const niche of niches) {
+      try {
+        await ensureSheetWithHeaders(sheetId, niche, headers);
+        created.push(niche);
+      } catch (e) {
+        console.log(`[Sheets] Error creating ${niche}:`, e.message);
+      }
     }
-    const allResults = [];
-    for (const { query, city } of queries) {
-      const results = await scrapeGoogleMaps({ browser, query, city, maxResults: maxPerQuery });
-      allResults.push(...results);
-      await sleep(3000 + Math.random() * 2000);
-    }
-    tracker.add('scrape_done', { count: allResults.length, queries });
-    if (allResults.length > 0) {
-      await appendToSheet(allResults).catch(e => console.log('[Scrape] Sheet append error:', e.message));
-    }
-    res.json({ count: allResults.length, results: allResults });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-function detectColumnMap(headerRow, dataRows) {
-  // Try exact header match first
-  const map = {};
-  EXPECTED_HEADERS.forEach(h => {
-    const idx = headerRow.findIndex(c => c.toLowerCase().trim() === h);
-    if (idx >= 0) map[h] = idx;
-  });
-  if (Object.keys(map).length >= 3) return map;
-
-  // Fuzzy match
-  EXPECTED_HEADERS.forEach(h => {
-    const idx = headerRow.findIndex(c => {
-      const col = c.toLowerCase().trim();
-      if (col === h) return true;
-      if (h === 'business_name' && (col.includes('name') || col.includes('business'))) return true;
-      if (h === 'phone' && (col.includes('phone') || col.includes('tel') || col.includes('mobile') || col.includes('number') || col.includes('whatsapp'))) return true;
-      if (h === 'address' && col.includes('address')) return true;
-      if (h === 'city' && (col.includes('city') || col.includes('town') || col.includes('lga'))) return true;
-      if (h === 'niche' && (col.includes('niche') || col.includes('category') || col.includes('type') || col.includes('service') || col.includes('industry'))) return true;
-      if (h === 'status' && col.includes('status')) return true;
-      if (h === 'rating' && (col.includes('rating') || col.includes('review') || col.includes('star'))) return true;
-      if (h === 'google_maps_url' && (col.includes('url') || col.includes('link') || col.includes('maps'))) return true;
-      if (h === 'source' && (col.includes('source') || col.includes('origin'))) return true;
-      return false;
-    });
-    if (idx >= 0 && !(h in map)) map[h] = idx;
-  });
-  if (Object.keys(map).length >= 3) return map;
-
-  // No headers detected — infer from data content
-  // Phone column: mostly digits, length 10-15
-  // Name column: mostly letters, length 3-100
-  // City column: matches known cities
-  // URL column: starts with http
-  if (dataRows.length > 0) {
-    const colScores = {};
-    const knownCities = ['lagos', 'abuja', 'ibadan', 'kano', 'port harcourt', 'enugu', 'owerri', 'benin', 'aba', 'onitsha', 'kaduna', 'ilorin', 'akure', 'jos', 'calabar', 'uyo', 'warri', 'sokoto', 'bauchi', 'maiduguri'];
-    for (let c = 0; c < Math.max(...dataRows.map(r => r.length), 5); c++) {
-      let digits = 0, letters = 0, total = 0, http = 0, cityMatch = 0;
-      dataRows.forEach(r => {
-        const v = (r[c] || '').trim();
-        if (!v) return;
-        total++;
-        const digitCount = (v.match(/[0-9]/g) || []).length;
-        const letterCount = (v.match(/[a-zA-Z]/g) || []).length;
-        if (digitCount > v.length * 0.6) digits++;
-        if (letterCount > v.length * 0.6) letters++;
-        if (v.startsWith('http')) http++;
-        if (knownCities.includes(v.toLowerCase())) cityMatch++;
-      });
-      if (total === 0) continue;
-      colScores[c] = { digits: digits/total, letters: letters/total, http: http/total, city: cityMatch/total };
-    }
-    // Assign best column for each header
-    const assigned = new Set();
-    EXPECTED_HEADERS.forEach(h => {
-      let best = -1, bestScore = 0;
-      Object.entries(colScores).forEach(([c, s]) => {
-        if (assigned.has(c)) return;
-        let score = 0;
-        if (h === 'phone') score = s.digits * 3;
-        else if (h === 'business_name') score = s.letters * 2;
-        else if (h === 'city') score = s.city * 5 + s.letters;
-        else if (h === 'google_maps_url') score = s.http * 5;
-        else if (h === 'address') score = s.letters * 1.5;
-        else if (h === 'niche') score = s.letters * 1.5;
-        if (score > bestScore) { bestScore = score; best = c; }
-      });
-      if (best >= 0) { map[h] = parseInt(best); assigned.add(parseInt(best)); }
-    });
-  }
-
-  // Final fallback: sequential
-  if (Object.keys(map).length < 3) {
-    EXPECTED_HEADERS.forEach((h, i) => {
-      if (i < headerRow.length && !(h in map)) map[h] = i;
-    });
-  }
-  return map;
-}
-
-app.post('/api/format-sheet', async (_req, res) => {
-  try {
-    const rows = await getSheetData(SHEET_ID);
-    if (!rows.length) return res.json({ message: 'Sheet is empty', cleaned: 0 });
-
-    const headerRow = rows[0];
-    const dataRows = rows.slice(1);
-    const headerMap = detectColumnMap(headerRow, dataRows);
-
-    const cleaned = dataRows.map(row => {
-      const obj = {};
-      EXPECTED_HEADERS.forEach(h => {
-        const idx = headerMap[h];
-        let val = (idx !== undefined && idx < row.length) ? String(row[idx] || '') : '';
-        if (h === 'phone') {
-          val = val.replace(/[^0-9]/g, '');
-          if (val.length === 13 && val.startsWith('234')) {}
-          else if (val.length === 11 && val.startsWith('0')) val = '234' + val.slice(1);
-          else if (val.length === 10) val = '234' + val;
-        }
-        if (h === 'business_name') val = val.trim();
-        if (h === 'scraped_at' && !val) val = new Date().toISOString();
-        obj[h] = val;
-      });
-      return obj;
-    }).filter(r => r.business_name);
-
-    await clearSheet(SHEET_ID);
-    const outputRows = [EXPECTED_HEADERS];
-    cleaned.forEach(r => outputRows.push(EXPECTED_HEADERS.map(h => r[h])));
-    await writeRange(SHEET_ID, 'Sheet1!A1', outputRows);
-
-    res.json({
-      message: 'Sheet formatted',
-      headers_detected: headerMap,
-      total_rows: rows.length,
-      cleaned_rows: cleaned.length,
-    });
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-app.post('/api/reset-sheet', async (_req, res) => {
-  try {
-    await clearSheet(SHEET_ID);
-    await writeRange(SHEET_ID, 'Sheet1!A1', [EXPECTED_HEADERS]);
-    res.json({ message: 'Sheet reset to clean headers', headers: EXPECTED_HEADERS });
+    res.json({ message: 'Sheets created', created });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -324,28 +323,31 @@ app.get('/api/sheet-info', async (_req, res) => {
 
 app.get('/api/stats', async (_req, res) => {
   try {
-    const sheetId = '1TkWu6TTLaImjFliOKOPS0AYznmf45TWEJSeEfNORguc';
-    const rows = await getSheetData(sheetId);
-    let total = 0, byStatus = {}, byCity = {}, byNiche = {}, recent = [];
-    if (rows && rows.length >= 2) {
+    const sheetId = process.env.SHEET_ID || '1TkWu6TTLaImjFliOKOPS0AYznmf45TWEJSeEfNORguc';
+    const info = await getSheetInfo(sheetId);
+    const byTab = {};
+    let total = 0;
+    for (const s of (info.sheets || [])) {
+      const title = s.properties.title;
+      const rows = await getSheetData(sheetId, `${title}!A1:Z${Math.min(s.properties.gridProperties.rowCount, 300)}`);
+      if (rows.length < 2) { byTab[title] = { total: 0 }; continue; }
       const headers = rows[0];
-      const data = rows.slice(1).map(r => {
-        const obj = {};
-        headers.forEach((h, i) => obj[h.trim()] = (r[i] || '').trim());
-        return obj;
-      });
-      const valid = data.filter(r => r.business_name);
-      total = valid.length;
-      valid.forEach(r => {
-        byStatus[r.status || 'new'] = (byStatus[r.status || 'new'] || 0) + 1;
-        byCity[r.city || 'unknown'] = (byCity[r.city || 'unknown'] || 0) + 1;
-        byNiche[r.niche || 'unknown'] = (byNiche[r.niche || 'unknown'] || 0) + 1;
-      });
-      recent = valid.slice(-20).reverse();
+      const statusIdx = headers.findIndex(h => /status/i.test(h));
+      const data = rows.slice(1).filter(r => r[0] && r[0].trim());
+      byTab[title] = { total: data.length };
+      if (statusIdx >= 0) {
+        const byStatus = {};
+        data.forEach(r => {
+          const st = (r[statusIdx] || 'new').trim().toLowerCase() || 'new';
+          byStatus[st] = (byStatus[st] || 0) + 1;
+        });
+        byTab[title].byStatus = byStatus;
+      }
+      total += data.length;
     }
     const auto = tracker.getStats();
     const timeline = tracker.getAll(30);
-    res.json({ total, byStatus, byCity, byNiche, recent, auto, timeline });
+    res.json({ total, byTab, auto, timeline });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -438,30 +440,47 @@ function render(d) {
       <div class="card card-msg"><div class="val">\${a.total_messages_replied||0}</div><div class="lbl">Replies Received</div></div>
       <div class="card card-err"><div class="val">\${a.total_errors||0}</div><div class="lbl">Errors</div></div>
     </div>
-    <div class="section-title">Leads Overview</div>
+    <div class="section-title">Leads by Niche</div>
+    <div class="cards" id="nicheCards"></div>
+    <div class="section-title">Messages Sent vs Replies</div>
     <div class="cards">
-      <div class="card card-lead"><div class="val">\${d.total}</div><div class="lbl">Total Leads</div></div>
-      <div class="card card-lead"><div class="val">\${d.byStatus.new||0}</div><div class="lbl">New</div></div>
-      <div class="card card-lead"><div class="val">\${d.byStatus.sent||0}</div><div class="lbl">Messaged</div></div>
-      <div class="card card-lead"><div class="val">\${d.byStatus.replied||0}</div><div class="lbl">Replied</div></div>
+      <div class="card card-msg"><div class="val">\${a.total_messages_sent||0}</div><div class="lbl">Total Sent</div></div>
+      <div class="card card-msg"><div class="val">\${a.total_messages_replied||0}</div><div class="lbl">Replies</div></div>
     </div>
     <div class="row">
       <div class="panel">
         <div class="section-title">Activity Timeline</div>
         <div class="timeline">\${renderTimeline(d.timeline||[])}</div>
       </div>
-      <div class="panel">
-        <div class="section-title">Leads by City</div>
-        \${bars(d.byCity)}
-        <div class="section-title" style="margin-top:20px">Leads by Niche</div>
-        \${bars(d.byNiche)}
-      </div>
-    </div>
-    <div class="panel">
-      <div class="section-title">Recent Leads</div>
-      \${d.recent.length ? '<table><tr><th>Name</th><th>Phone</th><th>City</th><th>Status</th></tr>'+d.recent.map(r=>'<tr><td>'+esc(r.business_name)+'</td><td>'+esc(r.phone)+'</td><td>'+esc(r.city)+'</td><td><span class="badge badge-'+(r.status||'new')+'">'+esc(r.status||'new')+'</span></td></tr>').join('')+'</table>' : '<div class="empty">No leads yet</div>'}
+      <div class="panel" id="nicheDetail"></div>
     </div>
   \`;
+  renderNicheCards(d.byTab);
+}
+function renderNicheCards(byTab) {
+  const container = document.getElementById('nicheCards');
+  const detail = document.getElementById('nicheDetail');
+  if (!byTab || !Object.keys(byTab).length) {
+    container.innerHTML = '<div class="card card-lead"><div class="val">0</div><div class="lbl">No sheets found</div></div>';
+    return;
+  }
+  let html = '';
+  let detailHtml = '<div class="section-title">Status Breakdown</div>';
+  Object.entries(byTab).forEach(([name, info]) => {
+    const st = info.byStatus || {};
+    const newCount = st.new || st[''] || 0;
+    const sentCount = st.msg1_sent || 0;
+    const repliedCount = st.msg2_sent || 0;
+    html += '<div class="card card-lead"><div class="val">'+info.total+'</div><div class="lbl">'+esc(name)+'</div></div>';
+    detailHtml += '<div style="margin-top:12px"><div class="bar" style="margin-bottom:4px"><div class="key" style="width:160px">'+esc(name)+'</div><div class="track"><div class="fill" style="width:100%"></div></div></div>';
+    detailHtml += '<div style="padding-left:160px;font-size:12px;color:#71717a">';
+    detailHtml += '<span style="color:#818cf8;margin-right:12px">New: '+newCount+'</span>';
+    detailHtml += '<span style="color:#4ade80;margin-right:12px">Msg1 Sent: '+sentCount+'</span>';
+    detailHtml += '<span style="color:#d946ef">Replied: '+repliedCount+'</span>';
+    detailHtml += '</div></div>';
+  });
+  container.innerHTML = html;
+  detail.innerHTML = detailHtml;
 }
 function renderTimeline(events) {
   if (!events.length) return '<div class="empty">No activity yet</div>';
@@ -495,75 +514,9 @@ setInterval(load, 15000);
 </html>`);
 });
 
-const SCRAPE_HOUR = parseInt(process.env.SCRAPE_HOUR || '8');
-const SCRAPE_MINUTE = parseInt(process.env.SCRAPE_MINUTE || '45');
-const SCRAPE_N8N_URL = process.env.SCRAPE_N8N_URL || '';
-
-const CITIES = ['Abuja', 'Lagos', 'Port-Harcourt', 'Ibadan', 'Aba', 'Owerri'];
-const NICHES = ['beauty spa', 'barber shop', 'private dental clinic', 'suya spot', 'physiotherapy clinic', 'event planner', 'private school'];
-
-const SHEET_ID = '1TkWu6TTLaImjFliOKOPS0AYznmf45TWEJSeEfNORguc';
-
-const EXPECTED_HEADERS = ['business_name','phone','address','rating','city','niche','google_maps_url','status','source','scraped_at'];
-
-async function appendToSheet(rows) {
-  const values = rows.map(r => EXPECTED_HEADERS.map(h => {
-    let v = r[h] || '';
-    if (h === 'scraped_at') v = new Date().toISOString();
-    return String(v);
-  }));
-  await appendRows(SHEET_ID, values);
-  console.log(`[Sheets] Appended ${values.length} rows`);
-}
-
-async function runDailyScrape() {
-  console.log(`[Scheduler] Starting daily scrape at ${new Date().toISOString()}`);
-  tracker.add('scrape_start', {});
-  try {
-    const browser = waClient.pupBrowser;
-    if (!browser) { console.log('[Scheduler] Browser not ready'); return; }
-
-    const allResults = [];
-    for (const city of CITIES) {
-      for (const niche of NICHES) {
-        const results = await scrapeGoogleMaps({ browser, query: niche, city, maxResults: 8 });
-        allResults.push(...results);
-        await sleep(4000 + Math.random() * 3000);
-      }
-    }
-    console.log(`[Scheduler] Scraped ${allResults.length} leads total`);
-    tracker.add('scrape_done', { count: allResults.length, source: 'scheduled' });
-
-    if (allResults.length > 0) {
-      await appendToSheet(allResults);
-    }
-
-    if (SCRAPE_N8N_URL && allResults.length > 0) {
-      await fetch(SCRAPE_N8N_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ count: allResults.length, results: allResults }),
-      });
-      console.log(`[Scheduler] Sent results to N8N`);
-    }
-  } catch (err) {
-    console.error('[Scheduler] Error:', err.message);
-    tracker.add('error', { context: 'scrape', message: err.message });
-  }
-}
-
-setInterval(() => {
-  const now = new Date();
-  const hour = now.getUTCHours() + 1; // Africa/Lagos = UTC+1
-  const minute = now.getMinutes();
-  if (hour === SCRAPE_HOUR && minute === SCRAPE_MINUTE) {
-    runDailyScrape();
-  }
-}, 60000);
-console.log(`[Scheduler] Will run daily at ${SCRAPE_HOUR}:${String(SCRAPE_MINUTE).padStart(2,'0')} Lagos time`);
-
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
   console.log(`Session path: /root/.wa-session`);
   if (WEBHOOK_URL) console.log(`Webhook: ${WEBHOOK_URL}`);
+  if (N8N_WEBHOOK_URL) console.log(`N8N Webhook: ${N8N_WEBHOOK_URL}`);
 });
